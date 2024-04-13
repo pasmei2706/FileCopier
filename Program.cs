@@ -2,6 +2,7 @@ using FileCopier.Model;
 using Newtonsoft.Json;
 using Serilog;
 using Serilog.Events;
+using System.Reflection;
 
 namespace FileCopier;
 
@@ -33,7 +34,7 @@ class Program
         _watcher = new FileSystemWatcher
         {
             Path = _sourcePath,
-            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite
         };
 
         _watcher.Created += OnFileCreatedOrChanged;
@@ -51,7 +52,7 @@ class Program
         TimeSpan delay = CalculateDelay(restartTime);
 
         // Create a timer that triggers at the specified time daily
-        Timer timer = new Timer(RestartApplication, null, delay, TimeSpan.FromDays(1));
+        Timer timer = new(RestartApplication, null, delay, TimeSpan.FromDays(1));
 
         // Keep the application running
         Thread.Sleep(Timeout.Infinite);
@@ -61,14 +62,22 @@ class Program
     {
         try
         {
+
+            Log.Debug("Config path: {path}", _configFilePath);
+
             if (File.Exists(_configFilePath))
             {
                 // Load configuration from JSON file
                 string json = File.ReadAllText(_configFilePath);
-                var config = JsonConvert.DeserializeObject<ServiceConfig>(json) ?? new();
-                _sourcePath = config.SourcePath;
-                _destinationPath = config.DestinationPath;
-                _useGermanMonths = config.UseGermanMonths; // Default to false if not specified
+                dynamic config = JsonConvert.DeserializeObject(json, new JsonSerializerSettings
+                {
+                    StringEscapeHandling = StringEscapeHandling.EscapeNonAscii
+                }) ?? new();
+
+                _sourcePath = config["SourcePath"];
+                _destinationPath = config["DestinationPath"];
+                _useGermanMonths = config["UseGermanMonths"]; // Default to false if not specified
+                _restartTime = config["RestartTime"];
 
                 // If using German months, update source folder path
                 if (_useGermanMonths)
@@ -77,6 +86,8 @@ class Program
                     string germanMonth = DateTime.Now.ToString("MMMM", new System.Globalization.CultureInfo("de-DE"));
                     _sourcePath = Path.Combine(_sourcePath, currentYear, germanMonth);
                 }
+
+                // LogConfig(config);
             }
             else
             {
@@ -85,6 +96,12 @@ class Program
                 File.WriteAllText(_configFilePath, JsonConvert.SerializeObject(defaultConfig));
 
                 Log.Warning($"Config file not found. An empty JSON configuration file has been created at {_configFilePath}.");
+            }
+
+            if (string.IsNullOrWhiteSpace(_sourcePath))
+            {
+                Log.Fatal("Source directory is invalid.");
+                throw new ArgumentNullException(nameof(_sourcePath));
             }
 
             // Create source directory if it doesn't exist
@@ -107,6 +124,18 @@ class Program
         }
     }
 
+    private static void LogConfig(ServiceConfig config)
+    {
+        Type type = config.GetType();
+        PropertyInfo[] properties = type.GetProperties();
+
+        foreach (PropertyInfo property in properties)
+        {
+            object? value = property.GetValue(config);
+            Log.Debug($"{property.Name}: {value}");
+        }
+    }
+
     private static void OnFileCreatedOrChanged(object sender, FileSystemEventArgs e)
     {
         try
@@ -121,27 +150,38 @@ class Program
                 return;
             }
 
-            // Retry logic
-            const int maxRetries = 5;
-            const int delayMs = 1000; // Delay in milliseconds between retries
-
-            for (int i = 0; i < maxRetries; i++)
+            if (e.ChangeType == WatcherChangeTypes.Created || e.ChangeType == WatcherChangeTypes.Changed)
             {
-                try
-                {
-                    File.Copy(sourceFilePath, destinationFilePath, false);
-                    Log.Information($"Copied file {fileName} to {_destinationPath}.");
-                    return; // Exit the loop if copy is successful
-                }
-                catch (IOException ex) when (i < maxRetries - 1)
-                {
-                    Log.Warning($"Error copying file: {ex.Message}. Retrying...");
-                    Thread.Sleep(delayMs); // Wait before retrying
-                }
-            }
+                Thread.Sleep(1000);
 
-            // If all retries fail, log an error
-            Log.Error($"Failed to copy file {fileName} after {maxRetries} attempts.");
+                // Retry logic
+                const int maxRetries = 5;
+                const int delayMs = 1000; // Delay in milliseconds between retries
+
+                for (int i = 0; i < maxRetries; i++)
+                {
+                    try
+                    {
+                        if (File.Exists(destinationFilePath))
+                        {
+                            Thread.Sleep(5000);
+                            return;
+                        }
+
+                        File.Copy(sourceFilePath, destinationFilePath, false);
+                        Log.Information($"Copied file {fileName} to {_destinationPath}.");
+                        return; // Exit the loop if copy is successful
+                    }
+                    catch (IOException ex) when (i < maxRetries - 1)
+                    {
+                        Log.Warning($"Error copying file: {ex.Message}. Retrying...");
+                        Thread.Sleep(delayMs); // Wait before retrying
+                    }
+                }
+
+                // If all retries fail, log an error
+                Log.Error($"Failed to copy file {fileName} after {maxRetries} attempts.");
+            }
         }
         catch (Exception ex)
         {

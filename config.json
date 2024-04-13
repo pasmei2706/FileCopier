@@ -1,0 +1,9 @@
+{
+  "DestinationPath": "E:\\Destination",
+  "RestartTime": 4,
+  "ServiceDescription": "A service that copies files from source to destination.",
+  "ServiceDisplayName": "File Copier Service",
+  "ServiceName": "FileCopierService",
+  "SourcePath": "////Source",
+  "UseGermanMonths": true
+}
